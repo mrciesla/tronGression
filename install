@@ -1,0 +1,70 @@
+#!/usr/bin/python -O
+import sys
+import os
+import subprocess
+import re
+
+debug = True
+def installPkg(pkg):
+    print "Install {}?\n".format(pkg)
+    decision = raw_input("[Y/n]")
+    install = False
+    if(decision == "Y" or decision == "y"):
+        install = True
+    if(install == False):
+        print "Not installing {}\n".format(pkg)
+        return
+    myPkgCommand = subprocess.Popen("sudo apt-get install {}".format(pkg), shell=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    pkgCheckOutput = myPkgCommand.communicate()
+    retcode = myPkgCommand.poll()
+    if(debug):
+        print "install output was {}".format(pkgCheckOutput)
+
+
+def checkPkg(pkg):
+    myPkgCommand = subprocess.Popen("dpkg -s {}".format(pkg), shell=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    pkgCheckOutput = myPkgCommand.communicate()
+    retcode = myPkgCommand.poll()
+    if(debug):
+        print 'output {}\n'.format(pkgCheckOutput)
+    hasPkg = re.compile("Version")
+    match = hasPkg.search(str(pkgCheckOutput))
+    if(debug):
+        print "match is {}".format(match)
+
+    if hasPkg.search(str(pkgCheckOutput)):
+        if(debug):
+            print 'Has {}'.format(pkg)
+        return True
+
+    return False
+
+def installMySQLPython():
+    location = "http://downloads.sourceforge.net/project/mysql-python/mysql-python-test/1.2.4b4/MySQL-python-1.2.4b4.tar.gz"
+    output = "MySQL-python-1.2.4b4.tar.gz"
+    myPkgCommand = subprocess.Popen("wget {}".format(location), shell=True)
+    myPkgCommand.wait()
+    myPkgCommand = subprocess.Popen("tar zxf {}".format(output), shell=True)
+    myPkgCommand.wait()
+    os.chdir("MySQL-python-1.2.4b4")
+    myPkgCommand = subprocess.Popen("pwd", shell=True)
+    myPkgCommand.wait()
+    myPkgCommand = subprocess.Popen("setup.py", shell=True)
+    myPkgCommand.wait()
+
+def main():
+    pkgs = ["mysql-server", "python-setuptools",  "zlibc", "openssl", "gcc", "wget", "python-mysqldb"]
+    for pkg in pkgs:
+        hasPkg = checkPkg(pkg)
+        print "Has {} {}\n".format(pkg, hasPkg)
+        if(hasPkg == False):
+            installPkg(pkg)
+
+    #installMySQLPython()
+
+
+
+if __name__ == "__main__":
+    main()
+
+

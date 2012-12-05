@@ -1,0 +1,403 @@
+#!/usr/bin/python -O
+import os
+import re
+import subprocess
+import sys
+import getopt
+import _mysql
+import MySQLdb as mdb
+import argparse
+
+
+class bcolors:
+    HEADER = '\033[95m'
+    OKBLUE = '\033[94m'
+    OKGREEN = '\033[92m'
+    WARNING = '\033[93m'
+    FAIL = '\033[91m'
+    ENDC = '\033[0m'
+
+debug = False
+
+def openCursor(longConn):
+    longCurr = longConn.cursor()
+    return longCurr
+
+def commitConn(longConn):
+    if(longConn):
+        longConn.commit()
+
+def openConn():
+    longConn = mdb.connect(host='localhost', user='root', passwd='root', db='regression')
+    return longConn
+
+
+def convertRowToDict(row, meta):
+    dict = {}
+    for (name, value) in zip(meta, row):
+        dict[name[0]] = value
+
+    return dict
+
+def executeCommand(command, longCurr):
+    longCurr.execute(command)
+    data = longCurr.fetchall()
+    return data
+
+def executeSingleCommand(command):
+    conn = mdb.connect(host='localhost', user='root', passwd='root')
+    cursor = conn.cursor()
+    cursor.execute(command)
+    data = cursor.fetchone()
+    conn.commit()
+    cursor.close
+    return data
+
+def createTables():
+    executeSingleCommand('CREATE DATABASE IF NOT EXISTS regression')
+    executeSingleCommand("CREATE TABLE IF NOT EXISTS `regression`.`tests` \
+      (`test_id` INT NOT NULL AUTO_INCREMENT, \
+        `name` varchar(200),\
+        `command` LONGBLOB,\
+        `time` TIMESTAMP,\
+        PRIMARY KEY(`test_id`))");
+    executeSingleCommand("CREATE TABLE IF NOT EXISTS`regression`.`results` (\
+        `FKtest_id` INT NOT NULL ,\
+        `result_id` INT NOT NULL AUTO_INCREMENT ,\
+        `revision` INT NOT NULL ,\
+        `time` TIMESTAMP NOT NULL ,\
+        `result` VARCHAR(45) NOT NULL ,\
+        PRIMARY KEY (`result_id`, `FKtest_id`) ,\
+        INDEX `FKtest_id` (`FKtest_id` ASC) ,\
+        CONSTRAINT `FKtest_id`\
+        FOREIGN KEY (`FKtest_id` )\
+        REFERENCES `regression`.`tests` (`test_id` )\
+        ON DELETE NO ACTION\
+        ON UPDATE NO ACTION)")
+    executeSingleCommand("CREATE TABLE IF NOT EXISTS `regression`.`knownGood` (\
+        `good_id` INT NOT NULL AUTO_INCREMENT ,\
+        `data` LONGBLOB NOT NULL ,\
+        `FKtest_id` INT NOT NULL ,\
+        `FKresult_id` INT NOT NULL ,\
+        PRIMARY KEY (`good_id`) ,\
+        INDEX `FKtest_id` (`FKtest_id` ASC) ,\
+        INDEX `FKresult_id` (`FKresult_id` ASC) ,\
+        FOREIGN KEY (`FKtest_id` )\
+        REFERENCES `regression`.`tests` (`test_id` )\
+        ON DELETE NO ACTION\
+        ON UPDATE NO ACTION,\
+        CONSTRAINT `FKresult_id`\
+        FOREIGN KEY (`FKresult_id` )\
+        REFERENCES `regression`.`results` (`result_id` )\
+        ON DELETE NO ACTION\
+        ON UPDATE NO ACTION)")
+
+def init():
+    createTables()
+
+
+def deleteAllData():
+    decision = raw_input("Delete all data?[Y/n]")
+    if(decision == "Y" or decision == "y"):
+        executeSingleCommand("DROP DATABASE regression");
+
+
+def runTestCommand(testText):
+    lines = testText.split("\n")
+    for line in lines[1:]:
+        command = subprocess.Popen(line, shell=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        output = command.communicate()
+        retcode = command.poll()
+    outputFile = lines[0]
+    f = open(outputFile, "r")
+    output = f.read()
+    return output
+
+def addTest(params):
+    testName = params[0];
+    inputScript = params[1];
+    f = open(inputScript, "r")
+    testText = f.read()
+    f.close()
+    knownGoodText = runTestCommand(testText)
+    decision = raw_input("Show output of test?[Y/n]")
+    if(decision == "Y" or decision == "y"):
+        print knownGoodText
+    decision = raw_input("Result Correct?[Y/n/A]")
+    result = "Passed"
+    if(decision == "n" or decision == "N"):
+        result = "Failed"
+    if(decision == "a" or decision == "A"):
+        print "aborting"
+        return;
+
+    revision = getRevision()
+    if(debug):
+        print "revision is {}".format(revision)
+    longConn = openConn()
+    longCurr= openCursor(longConn)
+
+    testText = mdb.escape_string(testText)
+    executeCommand("INSERT INTO `regression`.`tests`(name,command) VALUES ('{}','{}')".format(testName,testText), longCurr)
+    rows = executeCommand("SELECT `test_id` FROM `regression`.`tests` WHERE test_id=LAST_INSERT_ID()", longCurr);
+    testId= rows[0][0]
+    if(debug):
+        print "testId {}\n".format(testId)
+
+    executeCommand("INSERT INTO `regression`.`results`(revision, result, FKtest_id) VALUES ('{}', '{}', '{}')".format(revision, result, testId), longCurr)
+    rows = executeCommand("SELECT `result_id` FROM `regression`.`results` WHERE result_id=LAST_INSERT_ID()", longCurr);
+    resultId= rows[0][0]
+    print "resultId {}\n".format(resultId)
+    # executeCommand("INSERT INTO `regression`.`knownGood`(data, FKtest_id, FKresult_id) VALUES ('{}', '{}', '{}')".format(knownGood, testId, resultId))
+    knownGoodText = mdb.escape_string(knownGoodText)
+    executeCommand("INSERT INTO `regression`.`knownGood`(data, FKtest_id, FKresult_id) VALUES ('{}', '{}', '{}')".format(knownGoodText, testId, resultId), longCurr)
+    rows = executeCommand("SELECT `good_id` FROM `regression`.`knownGood` WHERE good_id=LAST_INSERT_ID()", longCurr);
+    goodId= rows[0][0]
+    if(debug):
+        print "goodId {}\n".format(goodId)
+    longCurr.close()
+    commitConn(longConn)
+
+def getSvnRevision():
+    svnCommand = subprocess.Popen("svn info", shell=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    output = svnCommand.communicate()
+    retcode = svnCommand.poll()
+    hasVersion = re.compile("Revision: (\d+)")
+    match = hasVersion.search(str(output))
+    return match.group(1)
+
+def getRevision():
+    svn = os.path.exists(".svn");
+    if(svn):
+        return getSvnRevision()
+    return 1
+
+
+    #TODO: Set up for long run
+def rejectTestCase(params):
+    testId = params[0]
+    revision = getRevision()
+    result = "Failed"
+    sql = "INSERT INTO `regression`.`results`(`FKtest_id`, `revision`, `result`) VALUES( {},{},'{}')".format(testId, revision, result)
+    executeSingleCommand(sql)
+    return True
+
+def recordSuccess(testId, longCurr):
+    revision = getRevision()
+    result = "Passed"
+    sql = "INSERT INTO `regression`.`results`(`FKtest_id`, `revision`, `result`) VALUES( {},{},'{}')".format(testId, revision, result)
+    rows = executeCommand(sql, longCurr);
+
+
+def acceptNewVersion(params):
+    testId = params[0]
+    goodText = params[1]
+    longCurr = params[2]
+    revision = getRevision()
+    result = "Passed(Updated)"
+    sql = "INSERT INTO `regression`.`results`(`FKtest_id`, `revision`, `result`) VALUES( {},{},'{}')".format(testId, revision, result)
+    rows = executeCommand(sql, longCurr);
+
+
+    sql = "SELECT `result_id` FROM `regression`.`results` WHERE result_id=LAST_INSERT_ID()"
+    rows = executeCommand(sql, longCurr);
+    resultId= rows[0][0]
+    goodText = mdb.escape_string(goodText)
+    sql = "INSERT INTO `regression`.`knownGood`(data, FKtest_id, FKresult_id) VALUES ('{}', '{}', '{}')".format(goodText, testId, resultId)
+    executeCommand(sql, longCurr)
+
+    return True
+
+def deleteDiffFiles():
+    rmCommand = subprocess.Popen("rm __diffTestData __diffGoodData", shell=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    Output = rmCommand.communicate()
+    retcode = rmCommand.poll()
+
+def createDiffFiles(testText, goodData):
+    f = open("__diffTestData", "w")
+    f.write(testText);
+    f.close()
+    f = open("__diffGoodData", "w")
+    f.write(goodData);
+    f.close()
+
+def diff(params, diffCmd):
+    testText = params[0];
+    goodData = params[1];
+    createDiffFiles(testText, goodData)
+    diffCommand = subprocess.Popen("{}  __diffTestData __diffGoodData".format(diffCmd), shell=True)
+    output = diffCommand.communicate()
+    retcode = diffCommand.poll()
+    deleteDiffFiles()
+
+def printDiff(params):
+    output = diff(params, "diff")
+    return False
+
+def visualDiff(params):
+    output = diff(params, "vimdiff")
+    return False
+
+def bail(params):
+    return True
+
+def resolveConflict(testText, goodData, testName, testId, longCurr):
+    decided = False
+    options = { 'a' : acceptNewVersion,
+                'd' : printDiff,
+                'r' : rejectTestCase,
+                'v' : visualDiff,
+                'q' : bail, }
+
+    params = {  'a' : (testId, testText, longCurr),
+                'd' : (testText, goodData),
+                'r' : (testId, longCurr),
+                'v' : (testText, goodData),
+                'q' : (), }
+
+    while(decided == False):
+        decision = raw_input("Data did not match how would you like to resolve this\n\
+        \t a -- accept the new version\n\
+        \t d -- print a diff of the data\n\
+        \t r -- reject test case\n\
+        \t v -- visual diff (vimdiff)\n\
+        \t q -- quit (do nothing)\n")
+        decided = options[decision](params[decision])
+
+def getGoodData(testId, longCurr):
+    sql = "SELECT `data` FROM `regression`.`knownGood` WHERE `FKtest_id`='{}' order by `good_id` DESC LIMIT 1".format(testId)
+    rows = executeCommand(sql, longCurr);
+    goodData= rows[0][0]
+    return goodData;
+
+def compareData(goodData, testText, testName, testId, longCurr):
+    if(testText != goodData):
+        print "Data did not match good data\n"
+        resolveConflict(testText, goodData, testName, testId, longCurr)
+    else:
+        print "{}{} {}Passed{}\n".format(bcolors.OKBLUE,testName, bcolors.OKGREEN, bcolors.ENDC)
+        decision = raw_input("Record success? [Y/n]\n")
+        if(decision == "Y" or decision == "y"):
+            recordSuccess(testId, longCurr)
+
+
+def runSingle(testName, longCurr):
+    sql = "SELECT `command`,`test_id` FROM `tests` WHERE `name`='{}' ORDER BY  `test_id` DESC LIMIT 1".format(testName)
+    print sql
+    rows = executeCommand(sql, longCurr)
+    meta = longCurr.description
+    results = convertRowToDict(rows[0], meta)
+    print "Dict is {}".format(results)
+
+    testId = results['test_id']
+    command = results['command']
+    print "command:\n{} testID {}".format(command, testId)
+    testText =  runTestCommand(command)
+    goodData = getGoodData(testId, longCurr);
+    sql = "SELECT `data` FROM `regression`.`knownGood` WHERE `FKtest_id`='{}' order by `good_id` DESC LIMIT 1".format(testId)
+    rows = executeCommand(sql, longCurr)
+    goodData= rows[0][0]
+    compareData(goodData, testText, testName, testId, longCurr)
+
+def runTest(testName):
+    testName = testName[0]
+    longConn = openConn()
+    longCurr= openCursor(longConn)
+    runSingle(testName, longCurr)
+    longCurr.close()
+    commitConn(longConn)
+
+def runTests(tests):
+    longConn = openConn()
+    longCurr= openCursor(longConn)
+    for test in tests:
+        runSingle(test, longCurr)
+    longCurr.close()
+    commitConn(longConn)
+
+def checkTest(params):
+    testName = params[0]
+    testOutputFile = params[1]
+    f = open(testOutputFile, "r")
+    testText = f.read()
+    if(debug):
+        print "Checking {} with outputFile {} against data in db\n".format(testName, testOutputFile)
+    longConn = openConn()
+    longCurr= openCursor(longConn)
+    sql = "SELECT `test_id` FROM `regression`.`tests` WHERE `name`='{}' order by `test_id` DESC LIMIT 1".format(testName)
+    rows = executeCommand(sql, longCurr);
+    testId= rows[0][0]
+    goodData = getGoodData(testId, longCurr);
+
+    if(debug):
+        print "Test {} ({}) with data\n {}\n".format(testName, testId, goodData)
+
+    compareData(goodData, testText, testName, testId, longCurr)
+    longCurr.close()
+    commitConn(longConn)
+
+
+def getColor(item):
+    colors = { "Passed" : bcolors.OKGREEN,
+               "Passed(Updated)": bcolors.WARNING,
+               "Failed": bcolors.FAIL}
+    if(item in colors):
+        return colors[item]
+    return bcolors.OKBLUE
+
+def printTestResults():
+    longConn = openConn()
+    longCurr= openCursor(longConn)
+    table = []
+    sql = "select name, result from( select max(result_id) as rid , FKtest_id as tid from results group by tid) as t1\
+            left join tests on (test_id=tid) right join results on (rid=result_id and tid=FKtest_id) where rid is not null";
+    rows = executeCommand(sql, longCurr);
+    desc = longCurr.description
+    for row in rows:
+        i = 0
+        for item in row[0:2]:
+            item.strip()
+            color = getColor(item)
+            print color + item.ljust( desc[i][2]+5, ' ') + bcolors.ENDC,
+        print ""
+
+    longCurr.close()
+    commitConn(longConn)
+
+def main():
+    parser = argparse.ArgumentParser(description='Options for regression check');
+    parser.add_argument('-i','--init',action='count',
+                        help='Initialize the regression for this project');
+    parser.add_argument('--DeleteAllData',action='count',
+                        help='Deletes all the tables and databse');
+    parser.add_argument('-a','--addTest', type=str, nargs=2,
+                        help='add a test to the database -a testName fileToGenerateOutput');
+    parser.add_argument('-c','--checkTest', type=str, nargs=2,
+                        help='Check the output of a test against the version in the db -c testName testOutputFile');
+    parser.add_argument('-r', '--runTest', type=str, nargs=1,
+                        help='Run the test from the script in DB -r testName');
+    parser.add_argument('-R', '--runTests', type=str, nargs='*',
+                        help='Run test from the script in DB for each test after -R [testName..]');
+    parser.add_argument('-p','--printLastTest', action='count',
+                        help='Print the results from the last run per test');
+    args = parser.parse_args();
+
+    if(args.DeleteAllData):
+        deleteAllData()
+    if(args.init):
+        init()
+    if(args.addTest):
+        addTest(args.addTest);
+    if(args.checkTest):
+        checkTest(args.checkTest)
+    if(args.printLastTest):
+        printTestResults()
+    if(args.runTest):
+        runTest(args.runTest)
+    if(args.runTests):
+        runTests(args.runTests)
+
+
+
+if __name__ == "__main__":
+    main()
