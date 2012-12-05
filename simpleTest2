@@ -1,0 +1,2 @@
+grepOutput
+grep "print" * > grepOutput

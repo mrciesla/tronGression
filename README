@@ -1,0 +1,23 @@
+
+I believe you need these package the readme for python-mysqldb was vague
+pkgs = ["mysql-server", "python-setuptools",  "zlibc", "openssl", "gcc", "wget", "python-mysqldb"]
+
+you can run ./install if you want it will just check those packages and install
+what is not there.
+
+Once that is going the ./regressionCheck -i will create a new database and the
+needed tables
+
+#Add a test
+./regressionCheck -a canonicalTestName scriptToGenerateTestOutput
+#Run a test
+./regressionCheck -r canonicalTestName
+#Run a set of tests
+./regressionCheck -R canonicalTestName1 canonicalTestName2 ....
+
+scriptToGenerateTestOutput
+first line is the output to compare against
+the rest generates the output
+ie:
+grepOutput
+grep "print" * > grepOuput
