@@ -28,7 +28,7 @@ def commitConn(longConn):
         longConn.commit()
 
 def openConn():
-    longConn = mdb.connect(host='localhost', user='root', passwd='root', db='regression')
+    longConn = mdb.connect(host='141.212.111.225', user='regression', passwd='tronlab', db='regression')
     return longConn
 
 
@@ -58,6 +58,7 @@ def createTables():
     executeSingleCommand("CREATE TABLE IF NOT EXISTS `regression`.`tests` \
       (`test_id` INT NOT NULL AUTO_INCREMENT, \
         `name` varchar(200),\
+        `valid` BOOL,\
         `command` LONGBLOB,\
         `time` TIMESTAMP,\
         PRIMARY KEY(`test_id`))");
@@ -138,7 +139,7 @@ def addTest(params):
     longCurr= openCursor(longConn)
 
     testText = mdb.escape_string(testText)
-    executeCommand("INSERT INTO `regression`.`tests`(name,command) VALUES ('{}','{}')".format(testName,testText), longCurr)
+    executeCommand("INSERT INTO `regression`.`tests`(name,command,valid) VALUES ('{}','{}','1')".format(testName,testText), longCurr)
     rows = executeCommand("SELECT `test_id` FROM `regression`.`tests` WHERE test_id=LAST_INSERT_ID()", longCurr);
     testId= rows[0][0]
     if(debug):
@@ -282,7 +283,7 @@ def compareData(goodData, testText, testName, testId, longCurr):
 
 
 def runSingle(testName, longCurr):
-    sql = "SELECT `command`,`test_id` FROM `tests` WHERE `name`='{}' ORDER BY  `test_id` DESC LIMIT 1".format(testName)
+    sql = "SELECT `command`,`test_id` FROM `tests` WHERE `name`='{}' and `valid`='1' ORDER BY `test_id` DESC LIMIT 1".format(testName)
     print sql
     rows = executeCommand(sql, longCurr)
     meta = longCurr.description
@@ -324,7 +325,7 @@ def checkTest(params):
         print "Checking {} with outputFile {} against data in db\n".format(testName, testOutputFile)
     longConn = openConn()
     longCurr= openCursor(longConn)
-    sql = "SELECT `test_id` FROM `regression`.`tests` WHERE `name`='{}' order by `test_id` DESC LIMIT 1".format(testName)
+    sql = "SELECT `test_id` FROM `regression`.`tests` WHERE `name`='{}' and `valid`='1' order by `test_id` DESC LIMIT 1".format(testName)
     rows = executeCommand(sql, longCurr);
     testId= rows[0][0]
     goodData = getGoodData(testId, longCurr);
@@ -350,7 +351,7 @@ def printTestResults():
     longCurr= openCursor(longConn)
     table = []
     sql = "select name, result from( select max(result_id) as rid , FKtest_id as tid from results group by tid) as t1\
-            left join tests on (test_id=tid) right join results on (rid=result_id and tid=FKtest_id) where rid is not null";
+            left join tests on (test_id=tid) right join results on (rid=result_id and tid=FKtest_id) where rid is not null and `valid`='1'";
     rows = executeCommand(sql, longCurr);
     desc = longCurr.description
     for row in rows:
@@ -363,6 +364,35 @@ def printTestResults():
 
     longCurr.close()
     commitConn(longConn)
+
+
+def printResultsHistory(test):
+    longConn = openConn()
+    longCurr= openCursor(longConn)
+    sql = "select `results`.`time`,`result` from tests right join results\
+            on (FKtest_id=test_id) where `name`='{}' and `valid`='1'".format(test)
+    rows = executeCommand(sql, longCurr);
+    meta = longCurr.description
+    timeSize = meta[0][2];
+    sizeOfName = len(test) + 3
+    print "|".rjust(sizeOfName,' '),
+    for row in rows:
+        rowData = convertRowToDict(row, meta)
+        color = bcolors.HEADER
+        timestamp = rowData['time'];
+        #print color + timestamp.ljust( timeSize+5, ' ') + bcolors.ENDC,
+        print  color + str(timestamp).center( timeSize+5, ' ')+ bcolors.ENDC +"|",
+
+    print "\n"+ bcolors.OKBLUE + test.ljust(sizeOfName-1,' ')+bcolors.ENDC + "|",
+    for row in rows:
+        rowData = convertRowToDict(row, meta)
+        result = rowData['result']
+        color = getColor(result)
+        print  color + result.center( timeSize+5, ' ')+ bcolors.ENDC +"|",
+
+    longCurr.close()
+    commitConn(longConn)
+
 
 def main():
     parser = argparse.ArgumentParser(description='Options for regression check');
@@ -380,6 +410,9 @@ def main():
                         help='Run test from the script in DB for each test after -R [testName..]');
     parser.add_argument('-p','--printLastTest', action='count',
                         help='Print the results from the last run per test');
+    parser.add_argument('-t','--printTestHistory', type=str, nargs=1,
+                        help='Print the result history for the test');
+
     args = parser.parse_args();
 
     if(args.DeleteAllData):
@@ -396,6 +429,8 @@ def main():
         runTest(args.runTest)
     if(args.runTests):
         runTests(args.runTests)
+    if(args.printTestHistory):
+        printResultsHistory(args.printTestHistory[0])
 
 
 
